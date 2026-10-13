@@ -1,0 +1,645 @@
+// Prisma schema for the Employee Work Assignment & Monitoring System.
+// Target database: MySQL / MariaDB (via XAMPP in development).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ---------------------------------------------------------------------------
+// Auth.js (NextAuth) required models
+// ---------------------------------------------------------------------------
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Organization / Identity
+// ---------------------------------------------------------------------------
+
+enum EmploymentStatus {
+  ACTIVE
+  ON_LEAVE
+  TERMINATED
+  RESIGNED
+}
+
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+model Department {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?   @db.Text
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  users User[]
+
+  @@index([isActive])
+  @@map("departments")
+}
+
+model Designation {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?   @db.Text
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  users User[]
+
+  @@index([isActive])
+  @@map("designations")
+}
+
+model Role {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?   @db.Text
+  isSystem    Boolean   @default(false) // system roles (e.g. Super Admin) cannot be deleted
+  level       Int       @default(0) // hierarchy: higher = more authority. You can only manage roles/users below your own level.
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  users           User[]
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@index([isActive])
+  @@index([level])
+  @@map("roles")
+}
+
+// One-time codes e-mailed for the forgot-password flow. Only a keyed hash of the code is stored.
+model PasswordResetOtp {
+  id        String   @id @default(cuid())
+  userId    String
+  codeHash  String   @db.VarChar(64)
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_otps")
+}
+
+// Additional roles a user holds on top of their primary role (User.roleId, the default at sign-in).
+// The user can switch between all of them without signing out.
+model UserRole {
+  id           String   @id @default(cuid())
+  userId       String
+  roleId       String
+  assignedById String?
+  assignedAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. "task.create"
+  module      String // e.g. "task"
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(cuid())
+  roleId       String
+  permissionId String
+  createdAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id             String           @id @default(cuid())
+  employeeId     String?          @unique // e.g. EMP001, null until assigned
+  name           String
+  email          String           @unique
+  emailVerified  DateTime?
+  phone          String?
+  image          String?
+  departmentId   String?
+  designationId  String?
+  roleId         String?
+  managerId      String?
+  joiningDate    DateTime?
+  employmentStatus EmploymentStatus @default(ACTIVE)
+  accountStatus  AccountStatus    @default(ACTIVE)
+  isAdmin        Boolean          @default(false) // super-admin escape hatch, distinct from Role
+  passwordHash   String?          @db.VarChar(255) // set by an admin or via self-service change; null = credentials login unavailable
+  notes          String?          @db.Text
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  deletedAt      DateTime?
+
+  department  Department?  @relation(fields: [departmentId], references: [id])
+  designation Designation? @relation(fields: [designationId], references: [id])
+  role        Role?        @relation(fields: [roleId], references: [id])
+  manager     User?        @relation("ManagerReports", fields: [managerId], references: [id])
+  reports     User[]       @relation("ManagerReports")
+
+  accounts Account[]
+  sessions Session[]
+
+  projectsManaged     Project[]           @relation("ProjectManager")
+  projectsCreated     Project[]           @relation("ProjectCreatedBy")
+  projectMemberships  ProjectMember[]
+  projectPins         ProjectPin[]
+  userRoles           UserRole[] // extra roles on top of the primary `role`
+  passwordResetOtps   PasswordResetOtp[]
+  tasksAssigned       Task[]              @relation("TaskAssignee")
+  tasksCreated        Task[]              @relation("TaskAssignedBy")
+  taskComments        TaskComment[]
+  taskProgressUpdates TaskProgressUpdate[]
+  todos               Todo[]
+  chatRoomsCreated    ChatRoom[]
+  chatRoomMemberships ChatRoomMember[]
+  messagesSent        Message[]           @relation("MessageSender")
+  meetingsCreated     Meeting[]           @relation("MeetingCreatedBy")
+  meetingParticipations MeetingParticipant[]
+  notifications       Notification[]
+  activityLogs        ActivityLog[]
+
+  @@index([roleId])
+  @@index([departmentId])
+  @@index([designationId])
+  @@index([managerId])
+  @@index([accountStatus])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Projects & Tasks
+// ---------------------------------------------------------------------------
+
+enum ProjectStatus {
+  PLANNING
+  NOT_STARTED
+  IN_PROGRESS
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String
+  description String?       @db.Text
+  startDate   DateTime?
+  endDate     DateTime?
+  managerId   String?
+  status      ProjectStatus @default(PLANNING)
+  priority    Priority      @default(MEDIUM)
+  progress    Int           @default(0) // 0-100, derived from tasks but cached here
+  createdById String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  completedAt DateTime? // set when status becomes COMPLETED, cleared if reopened
+  deletedAt   DateTime?
+
+  manager   User?           @relation("ProjectManager", fields: [managerId], references: [id])
+  createdBy User            @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  members   ProjectMember[]
+  tasks     Task[]
+  meetings  Meeting[]
+  pins      ProjectPin[]
+  techStack ProjectTech[]
+
+  @@index([managerId])
+  @@index([status])
+  @@map("projects")
+}
+
+// A user's personal pin on a project (shown on the Pinned Projects board).
+model ProjectPin {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  note      String?  @db.VarChar(500) // optional personal sticky note about why it's pinned
+  pinnedAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@map("project_pins")
+}
+
+enum TechCategory {
+  LANGUAGE
+  FRAMEWORK
+  DATABASE
+  INFRASTRUCTURE
+  TOOL
+  SERVICE
+  OTHER
+}
+
+// A tool / technology / technique a project uses or plans to use.
+model ProjectTech {
+  id        String       @id @default(cuid())
+  projectId String
+  name      String
+  category  TechCategory @default(TOOL)
+  version   String?
+  purpose   String?      @db.VarChar(500)
+  url       String?      @db.VarChar(500)
+  createdAt DateTime     @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@index([category])
+  @@map("project_tech")
+}
+
+model ProjectMember {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  addedAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@map("project_members")
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  REVIEW
+  COMPLETED
+  CANCELLED
+}
+
+model Task {
+  id             String     @id @default(cuid())
+  projectId      String?
+  title          String
+  description    String?    @db.Text
+  assignedToId   String?
+  assignedById   String
+  priority       Priority   @default(MEDIUM)
+  status         TaskStatus @default(TODO)
+  startDate      DateTime?
+  dueDate        DateTime?
+  estimatedHours Float?
+  actualHours    Float?
+  progress       Int        @default(0)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  completedAt    DateTime?
+  deletedAt      DateTime?
+
+  project    Project? @relation(fields: [projectId], references: [id])
+  assignedTo User?    @relation("TaskAssignee", fields: [assignedToId], references: [id])
+  assignedBy User     @relation("TaskAssignedBy", fields: [assignedById], references: [id])
+
+  comments        TaskComment[]
+  progressUpdates TaskProgressUpdate[]
+
+  @@index([projectId])
+  @@index([assignedToId])
+  @@index([status])
+  @@index([priority])
+  @@index([dueDate])
+  @@map("tasks")
+}
+
+model TaskComment {
+  id        String    @id @default(cuid())
+  taskId    String
+  userId    String
+  message   String    @db.Text
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  editedAt  DateTime?
+  deletedAt DateTime?
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([taskId])
+  @@index([userId])
+  @@map("task_comments")
+}
+
+model TaskProgressUpdate {
+  id               String     @id @default(cuid())
+  taskId           String
+  userId           String
+  previousProgress Int
+  newProgress      Int
+  previousStatus   TaskStatus
+  newStatus        TaskStatus
+  note             String?    @db.Text
+  createdAt        DateTime   @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([taskId])
+  @@map("task_progress_updates")
+}
+
+// ---------------------------------------------------------------------------
+// Personal Todos
+// ---------------------------------------------------------------------------
+
+enum TodoStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+model Todo {
+  id          String     @id @default(cuid())
+  userId      String
+  title       String
+  description String?    @db.Text
+  priority    Priority   @default(MEDIUM)
+  dueDate     DateTime?
+  status      TodoStatus @default(PENDING)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  completedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@map("todos")
+}
+
+// ---------------------------------------------------------------------------
+// Chat: group rooms + 1-to-1 conversations
+// ---------------------------------------------------------------------------
+
+model ChatRoom {
+  id          String   @id @default(cuid())
+  name        String
+  description String?  @db.Text
+  createdById String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy User             @relation(fields: [createdById], references: [id])
+  members   ChatRoomMember[]
+  messages  Message[]
+
+  @@index([createdById])
+  @@map("chat_rooms")
+}
+
+model ChatRoomMember {
+  id       String   @id @default(cuid())
+  roomId   String
+  userId   String
+  isAdmin  Boolean  @default(false)
+  joinedAt DateTime @default(now())
+
+  room ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([userId])
+  @@map("chat_room_members")
+}
+
+// A Conversation represents a 1-to-1 DM thread between two users.
+model Conversation {
+  id              String   @id @default(cuid())
+  participantOneId String
+  participantTwoId String
+  createdAt       DateTime @default(now())
+
+  messages Message[]
+
+  @@unique([participantOneId, participantTwoId])
+  @@index([participantTwoId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String    @id @default(cuid())
+  roomId         String?
+  conversationId String?
+  senderId       String
+  content        String    @db.Text
+  readAt         DateTime?
+  editedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  deletedAt      DateTime?
+
+  room         ChatRoom?     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User          @relation("MessageSender", fields: [senderId], references: [id])
+
+  @@index([roomId])
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([createdAt])
+  @@map("messages")
+}
+
+// ---------------------------------------------------------------------------
+// Meetings
+// ---------------------------------------------------------------------------
+
+enum MeetingStatus {
+  SCHEDULED
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Meeting {
+  id           String        @id @default(cuid())
+  title        String
+  description  String?       @db.Text
+  createdById  String
+  projectId    String?
+  date         DateTime
+  startTime    DateTime
+  endTime      DateTime
+  meetingLink  String
+  code         String?       @unique // Meet-style join code (abc-defg-hij); null on meetings created before in-app rooms
+  status       MeetingStatus @default(SCHEDULED)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  createdBy    User                 @relation("MeetingCreatedBy", fields: [createdById], references: [id])
+  project      Project?             @relation(fields: [projectId], references: [id])
+  participants MeetingParticipant[]
+
+  @@index([createdById])
+  @@index([projectId])
+  @@index([date])
+  @@index([status])
+  @@map("meetings")
+}
+
+enum MeetingParticipantStatus {
+  INVITED
+  ACCEPTED
+  DECLINED
+}
+
+model MeetingParticipant {
+  id        String                   @id @default(cuid())
+  meetingId String
+  userId    String
+  status    MeetingParticipantStatus @default(INVITED)
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, userId])
+  @@index([userId])
+  @@map("meeting_participants")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_UPDATED
+  TASK_COMPLETED
+  TASK_DEADLINE_APPROACHING
+  TASK_OVERDUE
+  NEW_MESSAGE
+  MEETING_SCHEDULED
+  MEETING_REMINDER
+  MENTION
+  ROLE_CHANGED
+}
+
+model Notification {
+  id         String           @id @default(cuid())
+  userId     String
+  type       NotificationType
+  title      String
+  message    String           @db.Text
+  entityType String?
+  entityId   String?
+  isRead     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Activity / Audit Log (immutable — insert-only)
+// ---------------------------------------------------------------------------
+
+model ActivityLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String // e.g. "task.status_changed"
+  entityType String // e.g. "Task"
+  entityId   String?
+  description String  @db.Text
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
